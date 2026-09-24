@@ -51,7 +51,7 @@ window.RESUME_CONFIG = {
             },
             {
                 category: "开源与运营",
-                description: "Datawhale 正式成员，29k+ star 开源核心贡献者；扣子空间、趋动云校园大使，组织十余场校园活动。"
+                description: "Datawhale 正式成员，32k+ star 开源核心贡献者；扣子空间、趋动云校园大使，校园花粉俱乐部部长。"
             }
         ],
         publications: [
@@ -75,7 +75,7 @@ window.RESUME_CONFIG = {
                 org: "datawhalechina",
                 url: "https://github.com/datawhalechina/self-llm",
                 role: "核心贡献者",
-                impact: "29k+ star",
+                impact: "32k+ star",
                 period: "2024.08 – 至今",
                 description: "围绕开源大模型、面向国内初学者、基于 Linux 平台的大模型教程；覆盖环境配置、本地部署、高效微调等全流程。"
             }
