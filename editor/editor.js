@@ -704,6 +704,7 @@ function debouncedSave() {
 }
 
 async function saveConfig() {
+    clearTimeout(saveTimer);
     // 注意：不再在每次保存时备份（会刷爆备份槽位）。
     // 备份时机 = 打开编辑器时的会话检查点 + 恢复/重置前 + 手动创建备份。
     try {
@@ -715,6 +716,7 @@ async function saveConfig() {
         });
         if (res.ok) {
             showStatus('saved');
+            return true;
         } else {
             throw new Error('Save failed');
         }
@@ -722,6 +724,7 @@ async function saveConfig() {
         showStatus('error');
         // 服务停止时横幅已说明情况，不再弹重复 toast
         if (!serverDead) showToast('保存失败: ' + e.message, 'error');
+        return false;
     }
 }
 
@@ -769,7 +772,7 @@ function showToast(msg, type) {
 // 发布/构建前必须调用，否则读到的还是旧配置
 async function flushSave() {
     clearTimeout(saveTimer);
-    await saveConfig();
+    if (!await saveConfig()) throw new Error('最新配置保存失败');
 }
 
 async function doBuild() {
@@ -997,7 +1000,11 @@ async function doPublish() {
     overlay.classList.add('active');
     try {
         await flushSave();
-    } catch (e) { /* saveConfig 内部已提示，继续用已保存内容发布 */ }
+    } catch (e) {
+        title.textContent = '未发布';
+        body.textContent = '最新配置保存失败，请检查编辑器服务后重试。';
+        return;
+    }
 
     // 第二步：构建 → 提交 → 推送
     title.textContent = '发布中...';
@@ -1072,6 +1079,14 @@ function switchTab(view) {
 // GLOBAL EVENTS
 // ============================================================
 function setupEvents() {
+    $('btn-resume-editor').addEventListener('click', async event => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        try {
+            await flushSave();
+            window.location.href = '/editor/resume';
+        } catch { /* Save errors are shown by saveConfig. */ }
+    });
     $('cards-container').addEventListener('click', (e) => {
         const toggle = e.target.closest('[data-toggle]');
         if (toggle) {

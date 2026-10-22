@@ -7,7 +7,7 @@ window.HOMEPAGE_CONFIG = {
     site: {
         name: "晨旭不想写程序",
         tagline: "技术爱好者",
-        url: "",
+        url: "https://aaaieee.cn",
         ogImage: "/images/avatar.jpg"
     },
     seo: {
@@ -21,7 +21,7 @@ window.HOMEPAGE_CONFIG = {
         og: {
             title: "晨旭不想写程序 - 个人主页",
             description: "开发者 / 技术爱好者",
-            image: ""
+            image: "/images/avatar.jpg"
         }
     },
     pages: {

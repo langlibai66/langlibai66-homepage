@@ -437,6 +437,164 @@ const ThemeManager = {
   // 导出到全局
   window.ThemeManager = ThemeManager;
 
+  /**
+   * 自动初始化。
+   *
+   * 主页由 app.js 的 initTheme() 调用 ThemeManager.init()；但简历页 / 404 页
+   * 不加载 app.js，以前 ThemeManager 从未 init，导致 ThemeManager.schemes 是空的、
+   * 主题下拉里的配色方案列表渲染不出来（那几个页面的主题是靠 <head> 内联脚本
+   * 直接应用的，所以颜色正常，只有下拉列表是空的，很难察觉）。
+   * 这里做幂等初始化，保证两个入口都能用。
+   */
+  function ensureThemeManagerInit() {
+    if (ThemeManager.__initialized) return;
+    ThemeManager.__initialized = true;
+    try {
+      ThemeManager.init();
+    } catch (e) {
+      console.warn('[Theme] 初始化失败:', e);
+    }
+  }
+
+  if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', ensureThemeManagerInit);
+    } else {
+      ensureThemeManagerInit();
+    }
+  }
+
+  /**
+   * 主题设置下拉菜单的 UI 行为（主页与简历页共用）
+   *
+   * 以前简历页自己写了一份轻量实现：没有 aria-hidden 状态管理、没有
+   * aria-expanded / aria-controls、没有 Escape 关闭、打开时不移动焦点。
+   * 那份实现和主页 app.js 里的版本行为不一致，键盘和读屏用户体验是割裂的。
+   * 现在收敛到这一处，两个页面调用同一个函数。
+   */
+  function initThemeDropdownUI() {
+    const toggle = document.getElementById('nav-theme-toggle');
+    const dropdown = document.getElementById('theme-dropdown');
+    if (!dropdown) return;
+
+    const modeList = document.getElementById('theme-mode-list');
+    const schemeList = document.getElementById('theme-scheme-list');
+    const tm = window.ThemeManager;
+
+    const setOpen = (open) => {
+      dropdown.classList.toggle('is-active', open);
+      dropdown.setAttribute('aria-hidden', open ? 'false' : 'true');
+      if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+
+    // 右边缘与按钮对齐（比写死的 right:24px 更稳，按钮位置变化时也不会偏）
+    const align = () => {
+      if (!toggle) return;
+      const rect = toggle.getBoundingClientRect();
+      const width = dropdown.offsetWidth || 200;
+      dropdown.style.left = `${Math.max(8, rect.right - width)}px`;
+      dropdown.style.right = 'auto';
+    };
+
+    const paintMode = () => {
+      if (!tm || !modeList) return;
+      const cur = tm.getSavedTheme();
+      modeList.querySelectorAll('.theme-mode-item').forEach((it) => {
+        const active = it.dataset.mode === cur;
+        it.classList.toggle('is-active', active);
+        it.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+    };
+
+    const paintScheme = () => {
+      if (!tm || !schemeList) return;
+      const mode = tm.getEffectiveMode();
+      const cur = tm.getActiveScheme(mode);
+      const avail = tm.getAvailableSchemes(mode);
+      const def = tm.defaultScheme && tm.defaultScheme[mode];
+      schemeList.innerHTML = '';
+      avail.forEach((s) => {
+        const item = document.createElement('button');
+        item.className = 'theme-scheme-item';
+        item.type = 'button';
+        item.setAttribute('role', 'option');
+        item.setAttribute('aria-selected', cur && cur.id === s.id ? 'true' : 'false');
+        if (cur && cur.id === s.id) item.classList.add('is-active');
+        if (def === s.id) item.classList.add('is-default');
+        const dot = document.createElement('span');
+        dot.className = 'theme-scheme-item-icon';
+        dot.setAttribute('aria-hidden', 'true'); // 颜色信息由方案名称传达
+        if (s.colors && s.colors.bgPrimary) dot.style.setProperty('--scheme-bg-primary', s.colors.bgPrimary);
+        if (s.colors && s.colors.accent) dot.style.setProperty('--scheme-accent', s.colors.accent);
+        const name = document.createElement('span');
+        name.className = 'theme-scheme-item-name';
+        name.textContent = s.name;
+        item.appendChild(dot);
+        item.appendChild(name);
+        item.addEventListener('click', () => { tm.setScheme(s.id, mode); paintScheme(); });
+        schemeList.appendChild(item);
+      });
+    };
+
+    const update = () => { paintMode(); paintScheme(); };
+
+    if (toggle) {
+      toggle.setAttribute('aria-haspopup', 'true');
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.setAttribute('aria-controls', 'theme-dropdown');
+      toggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const willOpen = !dropdown.classList.contains('is-active');
+        if (willOpen) { align(); update(); }
+        setOpen(willOpen);
+        if (willOpen) {
+          const active = dropdown.querySelector('.theme-mode-item.is-active') ||
+                         dropdown.querySelector('.theme-mode-item');
+          if (active) active.focus();
+        }
+      });
+    }
+
+    // 点击外部关闭
+    document.addEventListener('click', (e) => {
+      if (!dropdown.classList.contains('is-active')) return;
+      if (dropdown.contains(e.target) || e.target === toggle) return;
+      setOpen(false);
+    });
+
+    // Escape 关闭并把焦点还给按钮
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (!dropdown.classList.contains('is-active')) return;
+      setOpen(false);
+      if (toggle) toggle.focus();
+    });
+
+    if (modeList) {
+      modeList.querySelectorAll('.theme-mode-item').forEach((it) => {
+        it.addEventListener('click', () => {
+          if (!tm) return;
+          tm.setSavedTheme(it.dataset.mode);
+          update();
+        });
+      });
+    }
+
+    document.addEventListener('themechange', update);
+    document.addEventListener('schemechange', update);
+    update();
+  }
+  window.initThemeDropdownUI = initThemeDropdownUI;
+
+  // DOM 就绪后自动初始化（幂等，重复调用也安全）
+  if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', () => initThemeDropdownUI());
+    } else {
+      initThemeDropdownUI();
+    }
+  }
+
   // 兼容 Node.js 导出
   if (typeof module !== "undefined" && module.exports) {
     module.exports = ThemeManager;

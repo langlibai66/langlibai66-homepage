@@ -205,6 +205,12 @@ async function processInlineJS(html, config) {
         if (attrs.includes('src=') || !js.trim() || !js.includes('\n')) {
             continue;
         }
+        // 跳过非 JavaScript 类型的 <script>（如 application/ld+json、application/json）
+        // 它们不是可执行 JS，喂给 terser 只会报错，还会破坏结构化数据
+        const typeMatch = attrs.match(/type\s*=\s*["']([^"']+)["']/i);
+        if (typeMatch && !/^(?:application|text)\/(?:x-)?(?:java|ecma)script$/i.test(typeMatch[1].trim())) {
+            continue;
+        }
         matches.push({ fullMatch, attrs, js, index: match.index });
     }
 

@@ -45,10 +45,14 @@ async function main() {
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
         if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
+        res.setHeader('Cache-Control', 'no-store');
         const url = new URL(req.url, `http://localhost:${port}`);
+        let pathname;
+        try { pathname = decodeURIComponent(url.pathname); }
+        catch { res.writeHead(400); res.end('Bad Request'); return; }
 
         // API: GET config
-        if (url.pathname === '/api/config' && req.method === 'GET') {
+        if (pathname === '/api/config' && req.method === 'GET') {
             try {
                 const content = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'config.js'), 'utf8');
                 res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -60,7 +64,7 @@ async function main() {
         }
 
         // API: POST config
-        if (url.pathname === '/api/config' && req.method === 'POST') {
+        if (pathname === '/api/config' && req.method === 'POST') {
             let body = '';
             req.on('data', c => body += c);
             req.on('end', () => {
@@ -76,7 +80,7 @@ async function main() {
         }
 
         // API: GET resume config (供 /editor/resume)
-        if (url.pathname === '/api/resume-config' && req.method === 'GET') {
+        if (pathname === '/api/resume-config' && req.method === 'GET') {
             try {
                 const content = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'resume.js'), 'utf8');
                 res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -88,7 +92,7 @@ async function main() {
         }
 
         // API: POST resume config
-        if (url.pathname === '/api/resume-config' && req.method === 'POST') {
+        if (pathname === '/api/resume-config' && req.method === 'POST') {
             let body = '';
             req.on('data', c => body += c);
             req.on('end', () => {
@@ -104,7 +108,7 @@ async function main() {
         }
 
         // API: POST upload avatar
-        if (url.pathname === '/api/upload-avatar' && req.method === 'POST') {
+        if (pathname === '/api/upload-avatar' && req.method === 'POST') {
             let body = '';
             req.on('data', c => body += c);
             req.on('end', () => {
@@ -126,7 +130,7 @@ async function main() {
         }
 
         // API: POST backup config (dedupe: skip if identical to latest backup)
-        if (url.pathname === '/api/backup' && req.method === 'POST') {
+        if (pathname === '/api/backup' && req.method === 'POST') {
             try {
                 const configPath = path.join(PROJECT_ROOT, 'src', 'config.js');
                 const backupDir = path.join(PROJECT_ROOT, '.editor-backups');
@@ -155,7 +159,7 @@ async function main() {
         }
 
         // API: GET status — whether config.js has unpublished changes vs git HEAD
-        if (url.pathname === '/api/status' && req.method === 'GET') {
+        if (pathname === '/api/status' && req.method === 'GET') {
             try {
                 let modified = false;
                 try {
@@ -169,7 +173,7 @@ async function main() {
         }
 
         // API: GET list backups
-        if (url.pathname === '/api/backups' && req.method === 'GET') {
+        if (pathname === '/api/backups' && req.method === 'GET') {
             try {
                 const backupDir = path.join(PROJECT_ROOT, '.editor-backups');
                 if (!fs.existsSync(backupDir)) { res.writeHead(200); res.end(JSON.stringify({ backups: [] })); return; }
@@ -189,7 +193,7 @@ async function main() {
         }
 
         // API: POST restore backup
-        if (url.pathname === '/api/restore' && req.method === 'POST') {
+        if (pathname === '/api/restore' && req.method === 'POST') {
             let body = '';
             req.on('data', c => body += c);
             req.on('end', () => {
@@ -208,7 +212,7 @@ async function main() {
         }
 
         // API: POST reset config to original (from git HEAD)
-        if (url.pathname === '/api/reset' && req.method === 'POST') {
+        if (pathname === '/api/reset' && req.method === 'POST') {
             try {
                 const configPath = path.join(PROJECT_ROOT, 'src', 'config.js');
                 const originalContent = execSync('git show HEAD:src/config.js', {
@@ -227,7 +231,7 @@ async function main() {
         }
 
         // API: build
-        if (url.pathname === '/api/build' && req.method === 'POST') {
+        if (pathname === '/api/build' && req.method === 'POST') {
             try {
                 const out = execSync('npm run build', { cwd: PROJECT_ROOT, encoding: 'utf8', stdio: 'pipe', timeout: 60000 });
                 res.writeHead(200); res.end(JSON.stringify({ success: true, output: out.trim() }));
@@ -238,7 +242,7 @@ async function main() {
         }
 
         // API: publish
-        if (url.pathname === '/api/publish' && req.method === 'POST') {
+        if (pathname === '/api/publish' && req.method === 'POST') {
             try {
                 const out = execSync('node publish.js', { cwd: PROJECT_ROOT, encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
                 res.writeHead(200); res.end(JSON.stringify({ success: true, output: out.trim() }));
@@ -249,23 +253,23 @@ async function main() {
         }
 
         // Static: editor routes
-        if (url.pathname === '/editor' || url.pathname === '/editor/') {
+        if (pathname === '/editor' || pathname === '/editor/') {
             serve(res, path.join(EDITOR_DIR, 'editor.html'));
             return;
         }
-        if (url.pathname === '/editor/resume' || url.pathname === '/editor/resume/') {
+        if (pathname === '/editor/resume' || pathname === '/editor/resume/') {
             serve(res, path.join(EDITOR_DIR, 'resume.html'));
             return;
         }
-        if (url.pathname.startsWith('/editor/')) {
-            serve(res, path.join(EDITOR_DIR, url.pathname.replace('/editor/', '')));
+        if (pathname.startsWith('/editor/')) {
+            serve(res, path.join(EDITOR_DIR, pathname.replace('/editor/', '')));
             return;
         }
 
         // Static: preview (dist/ or project root)
-        let fp = path.join(PROJECT_ROOT, 'dist', url.pathname === '/' ? 'index.html' : url.pathname);
-        if (!fs.existsSync(fp)) fp = path.join(PROJECT_ROOT, url.pathname === '/' ? 'index.html' : url.pathname);
-        if (!fs.existsSync(fp)) fp = path.join(EDITOR_DIR, url.pathname === '/' ? 'editor.html' : url.pathname.replace(/^\/+/, ''));
+        let fp = path.join(PROJECT_ROOT, 'dist', pathname === '/' ? 'index.html' : pathname);
+        if (!fs.existsSync(fp)) fp = path.join(PROJECT_ROOT, pathname === '/' ? 'index.html' : pathname);
+        if (!fs.existsSync(fp)) fp = path.join(EDITOR_DIR, pathname === '/' ? 'editor.html' : pathname.replace(/^\/+/, ''));
         serve(res, fp);
     });
 

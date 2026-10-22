@@ -3,13 +3,7 @@
  * 个人主页主逻辑文件（仅保留动态交互部分）
  */
 
-// ========== 强制页面从顶部开始（必须在最早时机执行）==========
-// 禁用浏览器自动恢复滚动位置
-if ('scrollRestoration' in history) {
-    history.scrollRestoration = 'manual';
-}
-// 立即滚动到顶部（不等待 DOMContentLoaded）
-window.scrollTo(0, 0);
+// 保留浏览器的返回位置恢复和带锚点的直达链接。
 
 // ========== 页面初始化 ==========
 function initPage() {
@@ -89,6 +83,7 @@ function initNavbarBrandEffect() {
     const hoverText = config?.nav?.brand?.hoverText || '~/whoami';
 
     let typingInterval = null;
+    let cycleInterval = null;
     let isTyping = false;
     let showOriginal = true; // 当前显示的是名字还是路径
 
@@ -138,6 +133,9 @@ function initNavbarBrandEffect() {
 
     // 循环切换
     const cycle = () => {
+        // 标签页不可见时直接跳过：setInterval 在后台标签页仍会触发，
+        // 白白做一堆 DOM 文本写入，用户回来时还会看到半截状态
+        if (document.hidden) return;
         if (isTyping) return;
 
         const nextText = showOriginal ? hoverText : originalName;
@@ -157,7 +155,7 @@ function initNavbarBrandEffect() {
         // 初始显示名字
         nameEl.textContent = originalName;
         // 每隔一段时间切换
-        setInterval(cycle, displayTime);
+        cycleInterval = setInterval(cycle, displayTime);
     };
 
     // 页面可见性变化时处理
@@ -168,6 +166,15 @@ function initNavbarBrandEffect() {
                 typingInterval = null;
             }
             isTyping = false;
+        } else {
+            // 回到前台时重置为完整名字，避免停在删除到一半的状态
+            if (typingInterval) {
+                clearInterval(typingInterval);
+                typingInterval = null;
+            }
+            isTyping = false;
+            nameEl.textContent = originalName;
+            showOriginal = true;
         }
     });
 
@@ -986,17 +993,14 @@ function safeSetTimeout(callback, delay) {
     return timeoutId;
 }
 
-// ========== 移除已完成的定时器ID ==========
-function removeTimeout(timeoutId) {
-    const index = pendingTimeouts.indexOf(timeoutId);
-    if (index > -1) {
-        pendingTimeouts.splice(index, 1);
-    }
-}
-
 // ========== 初始化动画 ==========
 function initAnimations() {
     const config = window.HOMEPAGE_CONFIG;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        const output = document.getElementById('quote-output');
+        if (output) output.textContent = (config.quotes || [])[0] || '';
+        return;
+    }
 
     // 延迟启动语录循环
     safeSetTimeout(() => {
@@ -1208,6 +1212,9 @@ document.addEventListener("visibilitychange", () => {
 // ========== 主题切换初始化 ==========
 function initTheme() {
     if (typeof ThemeManager !== 'undefined') {
+        // theme-utils.js 可能已经自初始化过（页面不加载 app.js 时的兜底），
+        // ThemeManager.init 内部会重新注册一次系统主题监听，重复调用会泄漏监听器
+        if (window.ThemeManager && window.ThemeManager.__initialized) return;
         ThemeManager.init();
     }
 }
@@ -1508,9 +1515,15 @@ class ElementGlow {
 
 // ========== 全局效果统一初始化 ==========
 function initGlobalEffects() {
-    new CustomCursor().init();
-    new GridParallax().init();
     new ScrollProgress().init();
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    // 自定义光标在触屏设备上完全没有意义（.cursor 是 display:none），
+    // 但 requestAnimationFrame 循环照跑，白耗电。只在有精确指针的设备上启用。
+    const hasFinePointer = window.matchMedia && window.matchMedia('(pointer: fine)').matches;
+    if (hasFinePointer) {
+        new CustomCursor().init();
+    }
+    new GridParallax().init();
     new ElementGlow().init();
 }
 
@@ -1665,6 +1678,8 @@ class ProjectsCarousel {
         for (let i = 0; i < visibleCards; i++) {
             const clone = this.originalCards[i % this.totalCards].cloneNode(true);
             clone.classList.add('carousel-clone');
+            clone.setAttribute('aria-hidden', 'true');
+            clone.setAttribute('tabindex', '-1');
             clone.dataset.cloneIndex = i;
             this.track.appendChild(clone);
         }
@@ -1675,6 +1690,8 @@ class ProjectsCarousel {
             const originalIndex = this.totalCards - 1 - (i % this.totalCards);
             const clone = this.originalCards[originalIndex].cloneNode(true);
             clone.classList.add('carousel-clone');
+            clone.setAttribute('aria-hidden', 'true');
+            clone.setAttribute('tabindex', '-1');
             clone.dataset.cloneIndex = -(i + 1);
             this.track.insertBefore(clone, this.track.firstChild);
         }
@@ -1729,7 +1746,10 @@ class ProjectsCarousel {
         this.wrapper.addEventListener('mouseleave', () => this.resume());
 
         // 监听过渡结束，处理无缝循环跳转
-        this.track.addEventListener('transitionend', () => {
+        // transitionend 会冒泡：卡片自身的 hover transform/box-shadow 过渡也会触发，
+        // 必须校验事件确实来自轨道自身且是 transform，否则会在滑动中途误跳索引
+        this.track.addEventListener('transitionend', (e) => {
+            if (e.target !== this.track || e.propertyName !== 'transform') return;
             this.handleTransitionEnd();
         });
 
@@ -1759,17 +1779,19 @@ class ProjectsCarousel {
 
     initTouchSwipe() {
         let startX = 0;
+        let startY = 0;
         let isDragging = false;
 
         this.track.addEventListener('touchstart', (e) => {
             startX = e.touches[0].clientX;
+            startY = e.touches[0].clientY;
             isDragging = true;
         }, { passive: true });
 
         this.track.addEventListener('touchmove', (e) => {
             if (!isDragging) return;
             const diffX = Math.abs(e.touches[0].clientX - startX);
-            const diffY = Math.abs(e.touches[0].clientY - startX);
+            const diffY = Math.abs(e.touches[0].clientY - startY);
             if (diffX > diffY && diffX > 10) {
                 e.preventDefault();
             }
@@ -2410,18 +2432,6 @@ class MusicPlayer {
         this.isLoading = loading;
     }
 
-    /**
-     * 销毁播放器
-     */
-    destroy() {
-        this.audio.pause();
-        this.audio.src = '';
-
-        // 从 MediaManager 注销
-        if (window.MediaManager) {
-            window.MediaManager.unregister(this.mediaId);
-        }
-    }
 }
 
 // 初始化音乐播放器

@@ -5,7 +5,7 @@
   "scripts": {
     "build": "node scripts/build.js",
     "editor": "node editor-server.js",
-    "serve": "npx http-server dist -p 8080",
+    "serve": "node scripts/serve.js",
     "publish": "node publish.js"
   },
   "keywords": [

@@ -93,20 +93,6 @@ const builtinSchemes = {
       border: "#282727",
     },
   },
-  nordSnowStorm: {
-    id: "nordSnowStorm",
-    name: "冰川青",
-    icon: "fa-snowflake",
-    modes: ["light"],
-    colors: {
-      accent: "#88C0D0",
-      bgPrimary: "#E5E9F0",
-      bgSecondary: "#ECEFF4",
-      textPrimary: "#2E3440",
-      textSecondary: "#4C566A",
-      border: "#D8DEE9",
-    },
-  },
   gruvboxLight: {
     id: "gruvboxLight",
     name: "复古风",
@@ -187,6 +173,61 @@ function hexToRgb(hex) {
 }
 
 /**
+ * WCAG 相对亮度
+ */
+function relativeLuminance(hex) {
+  const rgb = hexToRgb(hex).split(", ").map(Number);
+  const [r, g, b] = rgb.map((v) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/**
+ * 两个颜色的 WCAG 对比度
+ */
+function contrastRatio(a, b) {
+  const la = relativeLuminance(a);
+  const lb = relativeLuminance(b);
+  const [hi, lo] = la > lb ? [la, lb] : [lb, la];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/**
+ * 把 color 朝 bg 的反方向调整，直到对比度达到 target。
+ *
+ * 用途：--accent 常常选得比较鲜艳（#88C0D0 这类浅色），配浅色背景时
+ * 对比度只有 1.6:1，拿它当文字色或焦点框颜色几乎看不见。但直接把
+ * --accent 改深会让发光、描边、头像边框一起变浊。所以保留 --accent
+ * 做装饰，另外派生一个保证达标的 --accent-text 给文字/焦点框用。
+ *
+ * @param {string} color - 待调整颜色
+ * @param {string} bg - 背景色
+ * @param {number} target - 目标对比度，默认 4.5（WCAG AA 正文）
+ * @returns {string} - 调整后的 hex；最多迭代 40 次，达不到就返回能达到的最好结果
+ */
+function ensureContrast(color, bg, target = 4.5) {
+  if (contrastRatio(color, bg) >= target) return color;
+
+  const rgb = hexToRgb(color).split(", ").map(Number);
+  // 背景偏亮就往暗调（乘以衰减系数），偏暗就往亮调（朝白色插值）
+  const towardsWhite = relativeLuminance(bg) < 0.2;
+
+  let best = color;
+  for (let step = 1; step <= 40; step++) {
+    const t = step / 40;
+    const adjusted = towardsWhite
+      ? rgb.map((c) => Math.round(c + (255 - c) * t))
+      : rgb.map((c) => Math.round(c * (1 - t)));
+    const hex = `#${adjusted.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+    if (contrastRatio(hex, bg) >= target) return hex;
+    best = hex; // 记下最接近目标的一次
+  }
+  return best;
+}
+
+/**
  * 将 hex 颜色加深指定比例
  * @param {string} hex - #00ff9f 或 #fff
  * @param {number} amount - 加深比例 (0-1)
@@ -253,6 +294,10 @@ function buildCSSVariablesArray(colors, mode) {
     "--text-secondary:" + colors.textSecondary,
     "--accent:" + colors.accent,
     "--accent-deep:" + darkenColor(colors.accent, 0.2),
+    // 文字/焦点框专用的强调色：保证对 bg-primary 达到 WCAG AA 4.5:1。
+    // --accent 保持原样供发光、描边等装饰用途，避免改深后整体发浊。
+    "--accent-text:" + ensureContrast(colors.accent, colors.bgPrimary, 4.5),
+    "--focus-ring:" + ensureContrast(colors.accent, colors.bgPrimary, 3),
     "--border:" + colors.border,
     "--accent-dim:rgba(" + accentRgb + "," + derive.accentDim + ")",
     "--grid-color:rgba(" + accentRgb + "," + derive.gridColor + ")",
@@ -261,7 +306,6 @@ function buildCSSVariablesArray(colors, mode) {
     "--notice-bg-success:rgba(39,201,63," + derive.notice + ")",
     "--hover-bg:rgba(" + accentRgb + "," + derive.hover + ")",
     "--active-bg:rgba(" + accentRgb + "," + derive.active + ")",
-    "--focus-ring:" + colors.accent,
     "--shadow-sm:rgba(0,0,0," + derive.shadowSm + ")",
     "--shadow-md:rgba(0,0,0," + derive.shadowMd + ")",
     "--glow:rgba(" + accentRgb + "," + derive.glow + ")",
@@ -322,6 +366,30 @@ function getInlineScriptHelpers() {
       return "#" + rgb.map(function(c) { return Math.max(0, Math.round(c * (1 - amount))); }).map(function(c) { return c.toString(16).padStart(2, "0"); }).join("");
     }.toString(),
 
+    ensureContrast: function ensureContrast(color, bg, target) {
+      target = target || 4.5;
+      function lum(hex) {
+        var rgb = hexToRgb(hex).split(",").map(Number);
+        var lin = rgb.map(function(v) { var s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); });
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+      }
+      function cr(x, y) { var a = lum(x), b = lum(y); var hi = a > b ? a : b, lo = a > b ? b : a; return (hi + 0.05) / (lo + 0.05); }
+      if (cr(color, bg) >= target) return color;
+      var rgb = hexToRgb(color).split(",").map(Number);
+      var toWhite = lum(bg) < 0.2;
+      var best = color;
+      for (var step = 1; step <= 40; step++) {
+        var t = step / 40;
+        var adj = toWhite
+          ? rgb.map(function(c) { return Math.round(c + (255 - c) * t); })
+          : rgb.map(function(c) { return Math.round(c * (1 - t)); });
+        var hex = "#" + adj.map(function(c) { return c.toString(16).padStart(2, "0"); }).join("");
+        if (cr(hex, bg) >= target) return hex;
+        best = hex;
+      }
+      return best;
+    }.toString(),
+
     buildStyleString: function buildStyleString(colors, mode) {
       var d = DERIVE_CONFIG[mode];
       var a = hexToRgb(colors.accent);
@@ -333,6 +401,7 @@ function getInlineScriptHelpers() {
              "--text-secondary:" + colors.textSecondary + ";" +
              "--accent:" + colors.accent + ";" +
              "--accent-deep:" + darkenColor(colors.accent, 0.2) + ";" +
+             "--accent-text:" + ensureContrast(colors.accent, colors.bgPrimary, 4.5) + ";" +
              "--border:" + colors.border + ";" +
              "--accent-dim:rgba(" + a + "," + d.accentDim + ");" +
              "--grid-color:rgba(" + a + "," + d.gridColor + ");" +
@@ -341,7 +410,7 @@ function getInlineScriptHelpers() {
              "--notice-bg-success:rgba(39,201,63," + d.notice + ");" +
              "--hover-bg:rgba(" + a + "," + d.hover + ");" +
              "--active-bg:rgba(" + a + "," + d.active + ");" +
-             "--focus-ring:" + colors.accent + ";" +
+             "--focus-ring:" + ensureContrast(colors.accent, colors.bgPrimary, 3) + ";" +
              "--shadow-sm:rgba(0,0,0," + d.shadowSm + ");" +
              "--shadow-md:rgba(0,0,0," + d.shadowMd + ");" +
              "--glow:rgba(" + a + "," + d.glow + ");" +

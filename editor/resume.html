@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MoeWah · 简历编辑</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <link rel="stylesheet" href="editor.css">
+    <link rel="stylesheet" href="/editor/editor.css">
 </head>
 <body>
     <header class="editor-header">
@@ -21,7 +21,7 @@
             <button class="btn btn-secondary" id="btn-back-home" title="返回主页编辑器">
                 <i class="fa-solid fa-arrow-left"></i> 主页编辑
             </button>
-            <button class="btn btn-secondary" id="btn-save" title="保存到 src/resume.js 并重建预览">
+            <button class="btn btn-secondary" id="btn-save" title="保存到 src/resume.js">
                 <i class="fa-solid fa-floppy-disk"></i> 保存
             </button>
             <button class="btn btn-primary" id="btn-build" title="保存并重建 dist/resume/">
@@ -71,7 +71,7 @@
                             <button class="btn-icon" id="btn-close-preview" title="关闭预览"><i class="fa-solid fa-xmark"></i></button>
                         </div>
                     </div>
-                    <iframe id="preview-iframe" sandbox="allow-scripts allow-same-origin allow-popups"></iframe>
+                    <iframe id="preview-iframe" sandbox="allow-scripts allow-same-origin allow-popups allow-modals" title="简历预览"></iframe>
                 </div>
                 <pre id="config-source" class="hidden"><code id="config-code"></code></pre>
             </div>
@@ -89,6 +89,6 @@
         </div>
     </div>
 
-    <script src="resume.js"></script>
+    <script src="/editor/resume.js"></script>
 </body>
 </html>

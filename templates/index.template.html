@@ -5,23 +5,19 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, shrink-to-fit=no" />
 
         <!-- Page Title (SEO: 尽早声明) -->
-        <title>{{TITLE}}</title>
+        <title>{{PAGE_TITLE}}</title>
 
-        <!-- SEO Meta Tags (由 build.js 从 config.js 注入) -->
-        <meta name="description" content="{{DESCRIPTION}}" />
-        <meta name="keywords" content="{{KEYWORDS}}" />
+        <!-- SEO Meta Tags (由 build.js 从 config.js 生成：description/keywords/OG/Twitter) -->
+        {{SEO_META}}
 
-        <!-- Open Graph / Facebook -->
-        <meta property="og:type" content="website" />
-        <meta property="og:title" content="{{OG_TITLE}}" />
-        <meta property="og:description" content="{{OG_DESCRIPTION}}" />
-        <meta property="og:image" content="{{OG_IMAGE}}" />
+        <!-- Canonical：避免因尾斜杠、查询参数等产生重复收录 -->
+        {{CANONICAL}}
 
-        <!-- Twitter -->
-        <meta property="twitter:card" content="summary_large_image" />
-        <meta property="twitter:title" content="{{OG_TITLE}}" />
-        <meta property="twitter:description" content="{{OG_DESCRIPTION}}" />
-        <meta property="twitter:image" content="{{OG_IMAGE}}" />
+        <!-- theme-color：让移动端浏览器 UI 跟随站点主题 -->
+        {{THEME_COLOR}}
+
+        <!-- 结构化数据：帮助搜索引擎识别这是一个人物主页 -->
+        {{STRUCTURED_DATA}}
 
         <!-- Favicon -->
         {{FAVICON_LINKS}}
@@ -107,7 +103,7 @@
                 font-size: 16px;
                 font-weight: 500;
             }
-            .navbar-brand .prompt, .navbar-brand .brand-name { color: var(--accent); }
+            .navbar-brand .prompt, .navbar-brand .brand-name { color: var(--accent-text); }
             .navbar-menu { display: flex; align-items: center; gap: 8px; flex: 1; justify-content: center; }
             .nav-link {
                 position: relative;
@@ -119,7 +115,7 @@
                 transition: color 0.2s ease;
                 white-space: nowrap;
             }
-            .nav-link.active, .nav-link:hover { color: var(--accent); }
+            .nav-link.active, .nav-link:hover { color: var(--accent-text); }
             .navbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
             .nav-theme-toggle {
                 display: flex;
@@ -232,6 +228,13 @@
                 border-radius: 50%;
                 background: var(--scheme-accent, var(--accent));
             }
+            .theme-mode-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+            .theme-scheme-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+            .theme-scheme-item:hover .theme-scheme-item-icon { transform: scale(1.1); }
+            .theme-scheme-item.is-active .theme-scheme-item-icon {
+                border-color: var(--scheme-accent, var(--accent));
+                box-shadow: 0 0 10px var(--scheme-accent, var(--accent));
+            }
 
             /* ========== Main Container ========== */
             .container {
@@ -300,7 +303,7 @@
                 justify-content: center;
                 gap: 8px;
             }
-            .tagline .highlight { color: var(--accent); font-weight: 500; }
+            .tagline .highlight { color: var(--accent-text); font-weight: 500; }
 
             /* ========== Skeleton Screen ========== */
             .skeleton-container {
@@ -372,119 +375,6 @@
                 .navbar-toggle { display: none; }
             }
 
-            /* ========== Theme Dropdown (Critical - 防止 CSS 加载延迟闪烁) ========== */
-            .theme-dropdown {
-                position: fixed;
-                top: calc(var(--navbar-height) + 8px);
-                right: 24px;
-                z-index: var(--z-dropdown);
-                min-width: 200px;
-                max-width: 280px;
-                background: var(--bg-primary);
-                border: 1px solid var(--border);
-                border-radius: var(--radius-md, 12px);
-                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-                opacity: 0;
-                visibility: hidden;
-                transform: translateY(-8px);
-                transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s;
-            }
-            .theme-dropdown.is-active {
-                opacity: 1;
-                visibility: visible;
-                transform: translateY(0);
-            }
-            .theme-section {
-                padding: 4px 0;
-            }
-            .theme-section-label {
-                padding: 6px 12px 2px;
-                font-size: 10px;
-                font-weight: 600;
-                color: var(--text-secondary);
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }
-            .theme-mode-list {
-                display: flex;
-                flex-direction: column;
-            }
-            .theme-mode-item {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                padding: 6px 12px;
-                background: none;
-                border: none;
-                color: var(--text-primary);
-                cursor: pointer;
-                font-size: 12px;
-                text-align: left;
-                width: 100%;
-                transition: background 0.15s ease;
-            }
-            .theme-mode-item:hover { background: var(--hover-bg); }
-            .theme-mode-item.is-active { color: var(--accent); background: var(--active-bg); }
-            .theme-mode-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-            .theme-mode-item i {
-                width: 20px;
-                height: 20px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                border-radius: 4px;
-                background: var(--bg-secondary);
-                font-size: 12px;
-            }
-            .theme-divider {
-                height: 1px;
-                background: var(--border);
-                margin: 2px 0;
-            }
-            .theme-scheme-list {
-                padding: 0;
-                max-height: 200px;
-                overflow-y: auto;
-            }
-            .theme-scheme-item {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                padding: 6px 12px;
-                cursor: pointer;
-                transition: background 0.15s ease;
-                font-size: 12px;
-            }
-            .theme-scheme-item:hover { background: var(--hover-bg); }
-            .theme-scheme-item.is-active { background: var(--active-bg); }
-            .theme-scheme-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-            .theme-scheme-item-icon {
-                width: 20px;
-                height: 20px;
-                border-radius: 50%;
-                background: var(--scheme-bg-primary, var(--bg-secondary));
-                border: 1px solid var(--scheme-border, var(--border));
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                flex-shrink: 0;
-                box-sizing: border-box;
-                transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
-            }
-            .theme-scheme-item-icon::after {
-                content: '';
-                width: 10px;
-                height: 10px;
-                border-radius: 50%;
-                background: var(--scheme-accent, var(--accent));
-            }
-            .theme-scheme-item:hover .theme-scheme-item-icon { transform: scale(1.1); }
-            .theme-scheme-item.is-active .theme-scheme-item-icon {
-                border-color: var(--scheme-accent, var(--accent));
-                box-shadow: 0 0 10px var(--scheme-accent, var(--accent));
-            }
-
-            /* 邮箱复制提示 */
             .email-toast {
                 position: fixed;
                 left: 50%;
@@ -514,6 +404,15 @@
         <link rel="preload" href="style.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
         <noscript><link rel="stylesheet" href="style.css"></noscript>
 
+        <!-- 无 JS 时 #actual-content 被 content-initial-hidden 永久隐藏，
+             这里直接把它显示出来、并藏掉骨架屏，保证禁用 JS 的访客仍能看到内容 -->
+        <noscript>
+            <style>
+                #actual-content { opacity: 1 !important; visibility: visible !important; pointer-events: auto !important; }
+                #skeleton-screen { display: none !important; }
+            </style>
+        </noscript>
+
         <!-- JS Files: defer for non-blocking parallel download, ordered execution -->
         <!-- MediaManager 必须在 app.js 之前加载 -->
         <script src="media-manager.js" defer></script>
@@ -523,7 +422,7 @@
         <!-- Analytics Scripts (由 build.js 从 config.js 注入) -->
         {{ANALYTICS}}
     </head>
-    <body>
+    <body class="page-home">
         <!-- Skip Link - 键盘用户快速跳转到主内容 -->
         <a href="#actual-content" class="skip-link">跳到主要内容</a>
 
@@ -548,7 +447,7 @@
             </div>
 
             <!-- Actual Content (hidden initially via class for FOUC prevention) -->
-            <div class="profile content-initial-hidden" id="actual-content" aria-busy="true">
+            <main class="profile content-initial-hidden" id="actual-content" aria-busy="true" tabindex="-1">
                 <!-- Avatar - 首屏关键内容，不使用 lazy-load -->
                 <div class="avatar-wrapper">
                     <div class="avatar image-placeholder" id="avatar-placeholder">
@@ -565,6 +464,8 @@
                     <span class="paw-icon">{{TAGLINE_PREFIX}}</span>
                     <span class="highlight">{{TAGLINE_HIGHLIGHT}}</span>{{MUSIC_TOGGLE_ICON}}
                 </p>
+
+                {{PROFILE_ACTIONS}}
 
                 <!-- Music Player or Divider -->
                 {{MUSIC_PLAYER}}
@@ -610,7 +511,7 @@
                 {{DONATION}}
 
                 {{> footer}}
-            </div>
+            </main>
         </div>
 
         <!-- Donation Modal (静态存在，避免 JS 动态创建时闪烁) -->
@@ -631,7 +532,7 @@
                     var ta = document.createElement('textarea');
                     ta.value = email; ta.style.position = 'fixed'; ta.style.opacity = '0';
                     document.body.appendChild(ta); ta.select();
-                    try { document.execCommand('copy'); done(); } catch (e) { fail(); }
+                    try { document.execCommand('copy') ? done() : fail(); } catch (e) { fail(); }
                     document.body.removeChild(ta);
                 };
                 if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -645,6 +546,7 @@
                 t = document.createElement('div');
                 t.id = 'email-toast';
                 t.className = 'email-toast';
+                t.setAttribute('role', 'status');
                 document.body.appendChild(t);
             }
             t.textContent = msg;

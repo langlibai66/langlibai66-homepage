@@ -304,7 +304,7 @@
                 align-items: center;
                 gap: 6px;
                 padding: 10px 20px;
-                background: var(--accent);
+                background: var(--accent-text);
                 color: var(--bg-primary);
                 text-decoration: none;
                 border-radius: 8px;
@@ -360,15 +360,16 @@
         <script src="theme-utils.js" defer></script>
     </head>
     <body>
+        <a href="#error-content" class="skip-link">跳到主要内容</a>
         {{> navbar}}
 
         <!-- 404 Content -->
         <div class="container">
             <div class="error-wrapper">
-                <div class="error-content">
+                <div class="error-content" id="error-content" tabindex="-1">
                     <div class="error-code">404</div>
-                    <h1 class="error-title">页面走丢了</h1>
-                    <p class="error-message">抱歉，您访问的页面不存在或已被删除。</p>
+                    <h1 class="error-title">{{ERROR_TITLE}}</h1>
+                    <p class="error-message">{{ERROR_DESCRIPTION}}</p>
                     <div class="error-actions">
                         <a href="/" class="btn-home">
                             <i class="fa-solid fa-home"></i>

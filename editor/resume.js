@@ -381,15 +381,16 @@ function bindCardEvents(cardEl) {
 // ============================================================
 // PREVIEW
 // ============================================================
+let previewLoaded = false;
 function loadPreviewInPane(refresh = false) {
     const wrap = $('preview-frame-wrap');
     const placeholder = $('preview-placeholder');
-    const url = '/resume' + (refresh || cfg.__loaded ? '?t=' + Date.now() : '');
+    const url = '/resume/' + (refresh || previewLoaded ? '?t=' + Date.now() : '');
     wrap.querySelector('#preview-iframe').src = url;
-    $('preview-url').textContent = 'localhost:3000' + url;
+    $('preview-url').textContent = location.origin + url;
     wrap.classList.remove('hidden');
     placeholder.classList.add('hidden');
-    cfg.__loaded = true;
+    previewLoaded = true;
     // 同时刷新源码
     refreshConfigSource();
 }
@@ -400,6 +401,8 @@ function refreshConfigSource() {
 
 async function refreshPreview() {
     try {
+        if (!await saveConfig()) return;
+        $('btn-build').disabled = true;
         const res = await apiFetch('/api/build', { method: 'POST' });
         if (res && res.success) {
             showToast('已重建 dist/resume/', 'success');
@@ -407,7 +410,8 @@ async function refreshPreview() {
         } else {
             showToast('构建失败：' + (res?.error || ''), 'error');
         }
-    } catch (e) { /* serverDead */ }
+    } catch (e) { if (!serverDead) showToast('构建失败：' + e.message, 'error'); }
+    finally { $('btn-build').disabled = false; }
 }
 
 // ============================================================
@@ -420,6 +424,7 @@ function debouncedSave() {
     saveTimer = setTimeout(saveConfig, 500);
 }
 async function saveConfig() {
+    clearTimeout(saveTimer);
     try {
         const res = await apiFetch('/api/resume-config', {
             method: 'POST',
@@ -429,8 +434,14 @@ async function saveConfig() {
         if (res && res.success) {
             $('save-status').innerHTML = '<i class="fa-solid fa-circle-check"></i> 已保存';
             refreshConfigSource();
+            return true;
         }
-    } catch (e) { /* serverDead */ }
+        throw new Error(res?.error || '保存失败');
+    } catch (e) {
+        $('save-status').innerHTML = '<i class="fa-solid fa-circle-xmark"></i> 保存失败';
+        if (!serverDead) showToast('保存失败：' + e.message, 'error');
+        return false;
+    }
 }
 
 // ============================================================
@@ -438,14 +449,17 @@ async function saveConfig() {
 // ============================================================
 let serverDead = false;
 async function apiFetch(url, opts) {
+    let res;
     try {
-        const res = await fetch(url, opts);
-        if (serverDead) hideServerBanner();
-        return res.headers.get('content-type')?.includes('json') ? res.json() : res;
+        res = await fetch(url, opts);
     } catch (e) {
         showServerBanner();
         throw e;
     }
+    if (serverDead) hideServerBanner();
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '请求失败');
+    return data;
 }
 function showServerBanner() {
     serverDead = true;
@@ -491,7 +505,7 @@ async function init() {
 }
 
 function setupEvents() {
-    $('btn-back-home').addEventListener('click', () => { window.location.href = '/editor'; });
+    $('btn-back-home').addEventListener('click', async () => { if (await saveConfig()) window.location.href = '/editor'; });
     $('btn-save').addEventListener('click', saveConfig);
     $('btn-build').addEventListener('click', refreshPreview);
     $('btn-refresh-preview').addEventListener('click', () => loadPreviewInPane(true));

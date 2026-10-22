@@ -5,6 +5,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const sharp = require('sharp');
 const { getRSSArticles } = require('./rss-parser');
 const { fetchUserRepos, parseGitHubUser, formatNumber } = require('./github-fetcher');
 const { fetchUserContributions } = require('./contribution-fetcher');
@@ -382,18 +383,62 @@ function extractStringValue(content, key) {
     return null;
 }
 
+/**
+ * 按花括号配对提取 config.js 中某个顶层对象的源码片段
+ *
+ * 以前多个提取器用 `/key:\s*\{([\s\S]*?)\n\s*\},?\s*\n\s*\/\/ =/` 这类正则，
+ * 要求对象后面必须紧跟 `// =====` 分节注释才匹配得上。而可视化编辑器
+ * （editor/editor.js serializeConfig）保存配置时会把所有注释抹掉，
+ * 于是一次编辑就让这些提取器全部静默走 fallback——链接区标题变成
+ * "Quick Links"、RSS/捐赠/音乐/动态/留言板再也开不起来。
+ *
+ * 这里改成纯花括号配对，不依赖任何注释格式。
+ *
+ * @param {string} source - config.js 全文
+ * @param {string} key - 顶层键名，如 'linksConfig'
+ * @param {boolean} [topLevelOnly] - 为 true 时只匹配行首缩进 4 空格的顶层键，
+ *   用于区分顶层 `moments:` 和 `pages.moments`（后者缩进 8 空格）
+ * @returns {string|null} 对象内部源码（不含外层花括号），找不到返回 null
+ */
+function extractObjectSource(source, key, topLevelOnly) {
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const keyRe = topLevelOnly
+        ? new RegExp('^    ' + escaped + '\\s*:\\s*\\{', 'm')
+        : new RegExp('(?:^|[\\s,{])' + escaped + '\\s*:\\s*\\{');
+    const m = keyRe.exec(source);
+    if (!m) return null;
+
+    const start = m.index + m[0].length - 1; // 指向开头的 '{'
+    let depth = 0, inStr = false, strCh = '', inEscape = false;
+
+    for (let i = start; i < source.length; i++) {
+        const ch = source[i];
+        if (inStr) {
+            if (inEscape) inEscape = false;
+            else if (ch === '\\') inEscape = true;
+            else if (ch === strCh) inStr = false;
+            continue;
+        }
+        if (ch === '"' || ch === "'" || ch === '`') { inStr = true; strCh = ch; }
+        else if (ch === '{') depth++;
+        else if (ch === '}') {
+            depth--;
+            if (depth === 0) return source.slice(start + 1, i);
+        }
+    }
+    return null;
+}
+
 // 提取 LinksConfig 配置
 function extractLinksConfig() {
-    const configMatch = configContent.match(/linksConfig:\s*\{([\s\S]*?)\n\s*\},?\s*\n\s*\/\/ =/);
-    if (!configMatch) {
+    const configStr = extractObjectSource(configContent, 'linksConfig');
+    if (!configStr) {
         return {
             enabled: true,
-            titleText: 'Quick Links',
+            titleText: '链接导航',
             titleIcon: 'fa-solid fa-link',
         };
     }
-
-    const configStr = configMatch[1];
 
     const enabledMatch = configStr.match(/enabled:\s*(true|false)/);
     const titleTextMatch = configStr.match(/text:\s*['"`]([^'"`]+)['"`]/);
@@ -408,8 +453,8 @@ function extractLinksConfig() {
 
 // 提取 Donation 配置
 function extractDonationConfig() {
-    const configMatch = configContent.match(/donation:\s*\{([\s\S]*?)\n\s*\},?\s*\n\s*\/\/ =/);
-    if (!configMatch) {
+    const configStr = extractObjectSource(configContent, 'donation');
+    if (!configStr) {
         return {
             enabled: false,
             titleText: 'Support Me',
@@ -419,7 +464,6 @@ function extractDonationConfig() {
         };
     }
 
-    const configStr = configMatch[1];
 
     const enabledMatch = configStr.match(/enabled:\s*(true|false)/);
     const titleTextMatch = configStr.match(/text:\s*['"`]([^'"`]+)['"`]/);
@@ -495,12 +539,11 @@ function extractThemeColor(themeBlock, key, fallback) {
  */
 function extractThemeConfig() {
     // 匹配 theme 对象
-    const themeMatch = configContent.match(/theme:\s*\{([\s\S]*?)\n\s*\},?\s*\n\s*\/\/ =/);
-    if (!themeMatch) {
+    const themeBlock = extractObjectSource(configContent, 'theme');
+    if (!themeBlock) {
         return null;
     }
 
-    const themeBlock = themeMatch[1];
 
     // 提取 default
     const defaultMatch = themeBlock.match(/default:\s*['"`](light|dark|auto)['"`]/);
@@ -618,6 +661,8 @@ function generateThemeInitScript() {
 
     ${helpers.darkenColor}
 
+    ${helpers.ensureContrast}
+
     function getEffectiveTheme(mode) {
         if (mode === "auto") return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
         return mode;
@@ -658,14 +703,15 @@ function generateThemeInitScript() {
     var theme = getEffectiveTheme(mode);
 
     // 应用主题（带容错保护，失败时使用 CSS 默认值）
+    // 注意：这里必须对 light 模式也写入变量。之前只在 dark 或用户显式存过
+    // scheme 时才写，导致首次访问的浅色用户在第一帧完全没有颜色变量
+    // （模板里 :root 的兜底值只覆盖基础几个，衍生色全是空的）。
     try {
         document.documentElement.setAttribute(THEME_ATTR, theme);
-        if (theme === "dark" || (stored && stored.schemes && stored.schemes[theme])) {
-            var scheme = getActiveScheme(theme, stored);
-            var colors = scheme ? getSchemeColors(scheme, theme) : getDefaultColors(theme);
-            if (colors) {
-                document.documentElement.style.cssText = buildStyleString(colors, theme);
-            }
+        var scheme = getActiveScheme(theme, stored);
+        var colors = scheme ? getSchemeColors(scheme, theme) : getDefaultColors(theme);
+        if (colors) {
+            document.documentElement.style.cssText = buildStyleString(colors, theme);
         }
     } catch (e) {}
 
@@ -677,6 +723,7 @@ function generateThemeInitScript() {
     window.THEME_HELPERS = {
         hexToRgb: hexToRgb,
         darkenColor: darkenColor,
+        ensureContrast: ensureContrast,
         buildStyleString: buildStyleString
     };
 })();
@@ -745,8 +792,8 @@ function extractCustomScripts() {
 
 // 提取 RSS 配置
 function extractRSSConfig() {
-    const rssMatch = configContent.match(/rss:\s*\{([\s\S]*?)\n\s*\},\s*\n\s*\/\/ =/);
-    if (!rssMatch) {
+    const rssContent = extractObjectSource(configContent, 'rss');
+    if (!rssContent) {
         return {
             enabled: false,
             url: '',
@@ -760,7 +807,6 @@ function extractRSSConfig() {
         };
     }
 
-    const rssContent = rssMatch[1];
 
     const enabledMatch = rssContent.match(/enabled:\s*(true|false)/);
     const urlMatch = rssContent.match(/url:\s*['"`]([^'"`]+)['"`]/);
@@ -894,10 +940,12 @@ function processLinkUrl(url, external, antiCrawler = true) {
     if (antiCrawler && isEmailAddress(url)) {
         const email = url.replace('mailto:', '').trim();
         const encoded = encodeEmail(email);
-        // 改为点击复制邮箱并弹提示，而不是拉起邮件客户端（更通用，移动端也友好）
+        // 点击复制邮箱并弹提示（比拉起邮件客户端更通用，移动端也友好）。
+        // href 用真实 mailto: 而不是 javascript:void(0)，这样中键点击、
+        // “复制链接”、以及禁用 JS 时都仍然有一个可用的邮件入口。
         return {
-            href: 'javascript:void(0)',
-            attrs: `data-email-encoded="${encoded}" onclick="window.__copyEmail(this)"`,
+            href: `mailto:${email}`,
+            attrs: `data-email-encoded="${encoded}" onclick="window.__copyEmail(this); return false;"`,
             isEmail: true
         };
     }
@@ -931,6 +979,18 @@ function generateLinksHTML(links) {
     // 过滤掉未启用的链接
     const enabledLinks = links.filter(link => link.enabled !== false);
     return enabledLinks.map(generateLinkHTML).join('\n');
+}
+
+// 首屏入口复用现有链接配置，编辑器修改后同步生效。
+function generateProfileActionsHTML(links) {
+    const actions = ['blog', 'resume'].map(brand =>
+        links.find(link => link.brand === brand && link.enabled !== false)
+    ).filter(Boolean);
+    if (!actions.length) return '';
+    return `<div class="profile-actions">${actions.map((link, index) => {
+        const { href, attrs } = processLinkUrl(link.url, link.external, false);
+        return `<a class="profile-action${index === 0 ? ' is-primary' : ''}" href="${escapeHTML(href)}" ${attrs}><i class="${escapeHTML(link.icon)}" aria-hidden="true"></i>${escapeHTML(link.name)}<span aria-hidden="true">${link.external ? '↗' : '→'}</span></a>`;
+    }).join('')}</div>`;
 }
 
 // 生成链接模块（含顶部分割线和标题）
@@ -1099,7 +1159,11 @@ function generateSkeletonMusicHTML(music) {
 
 // 生成页脚 HTML（单行居中布局）
 function generateFooterHTML(config) {
-    const copyright = `© ${config.footerCopyrightYear} <a href="${config.footerCopyrightUrl}" target="_blank" rel="noopener noreferrer" class="footer-brand">${config.footerCopyrightName}</a>`;
+    // 未配置 url 时渲染纯文本，避免误链到模板作者的站点
+    const nameHtml = config.footerCopyrightUrl
+        ? `<a href="${config.footerCopyrightUrl}" target="_blank" rel="noopener noreferrer" class="footer-brand">${config.footerCopyrightName}</a>`
+        : `<span class="footer-brand">${config.footerCopyrightName}</span>`;
+    const copyright = `© ${config.footerCopyrightYear} ${nameHtml}`;
 
     // 如果启用 ICP 且有备案号，添加分隔符和 ICP 链接
     if (config.footerIcpEnabled && config.footerIcpNumber) {
@@ -1107,6 +1171,61 @@ function generateFooterHTML(config) {
     }
 
     return `<p class="footer-text">${copyright}</p>`;
+}
+
+/**
+ * 生成 robots.txt 与 sitemap.xml
+ * 通过扫描 dist 下的 HTML 文件收集 URL，新增页面时无需手动维护清单
+ * @param {string} distDir - dist 目录绝对路径
+ * @param {string} siteUrl - 站点完整 URL（为空时只生成 robots.txt，sitemap 用相对地址）
+ */
+function generateRobotsAndSitemap(distDir, siteUrl) {
+    const baseUrl = (siteUrl || '').replace(/\/$/, '');
+
+    // 递归收集所有 index.html / *.html
+    const htmlFiles = [];
+    (function walk(dir, prefix) {
+        fs.readdirSync(dir, { withFileTypes: true }).forEach(entry => {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                walk(full, prefix + entry.name + '/');
+            } else if (entry.name.endsWith('.html')) {
+                htmlFiles.push(prefix + entry.name);
+            }
+        });
+    })(distDir, '');
+
+    // 转成站点 URL：index.html → /，xxx/index.html → /xxx/，404.html 不进 sitemap
+    const urls = htmlFiles
+        .filter(f => f !== '404.html')
+        .map(f => (f === 'index.html' ? '/' : '/' + f.replace(/index\.html$/, '')))
+        .sort();
+
+    const robots = [
+        'User-agent: *',
+        'Allow: /',
+        '',
+        'Sitemap: ' + (baseUrl ? baseUrl + '/sitemap.xml' : '/sitemap.xml'),
+        ''
+    ].join('\n');
+    fs.writeFileSync(path.join(distDir, 'robots.txt'), robots, 'utf8');
+
+    const today = new Date().toISOString().slice(0, 10);
+    const sitemap = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+        ...urls.map(u => [
+            '  <url>',
+            '    <loc>' + (baseUrl ? baseUrl + u : u) + '</loc>',
+            '    <lastmod>' + today + '</lastmod>',
+            '  </url>'
+        ].join('\n')),
+        '</urlset>',
+        ''
+    ].join('\n');
+    fs.writeFileSync(path.join(distDir, 'sitemap.xml'), sitemap, 'utf8');
+
+    console.log('🤖 robots.txt + sitemap.xml: ' + urls.length + ' 个 URL' + (baseUrl ? '' : '（未配置 site.url，sitemap 使用相对地址）'));
 }
 
 // 生成 Donation HTML
@@ -1372,8 +1491,10 @@ function generateSkeletonRSSHTML(rssConfig) {
 
 // 提取 Projects 配置
 function extractProjectsConfig() {
-    const projectsMatch = configContent.match(/projects:\s*\{([\s\S]*?)\n\s*\},\s*\n\s*contribution:/);
-    if (!projectsMatch) {
+    // 用花括号配对取块。以前这里要求 projects: {...} 后面必须紧跟 contribution:，
+    // 依赖键的书写顺序——一旦调整配置项顺序就静默走兜底，projects 整个开不起来。
+    const projectsContent = extractObjectSource(configContent, 'projects');
+    if (!projectsContent) {
         return {
             enabled: false,
             titleText: 'Projects',
@@ -1383,8 +1504,6 @@ function extractProjectsConfig() {
             exclude: [],
         };
     }
-
-    const projectsContent = projectsMatch[1];
 
     const enabledMatch = projectsContent.match(/enabled:\s*(true|false)/);
 
@@ -1431,8 +1550,8 @@ function extractProjectsConfig() {
 
 // 提取 Contribution 配置
 function extractContributionConfig() {
-    const contribMatch = configContent.match(/contribution:\s*\{([\s\S]*?)\n\s*\}/);
-    if (!contribMatch) {
+    const contribContent = extractObjectSource(configContent, 'contribution');
+    if (!contribContent) {
         return {
             enabled: true,
             useRealData: true,
@@ -1440,7 +1559,6 @@ function extractContributionConfig() {
         };
     }
 
-    const contribContent = contribMatch[1];
 
     const enabledMatch = contribContent.match(/enabled:\s*(true|false)/);
     const useRealDataMatch = contribContent.match(/useRealData:\s*(true|false)/);
@@ -1455,10 +1573,9 @@ function extractContributionConfig() {
 
 // 提取 Moments 配置
 function extractMomentsConfig() {
-    // 找到 "// ========== 个人动态配置 ==========" 注释后的 moments 块
-    // 避免匹配到 pages.moments
-    const momentsStart = configContent.indexOf('// ========== 个人动态配置 ==========');
-    if (momentsStart === -1) {
+    // 顶层 moments 配置（用缩进区分 pages.moments，且不依赖分节注释是否存在）
+    const momentsContent = extractObjectSource(configContent, 'moments', true);
+    if (!momentsContent) {
         return {
             enabled: false,
             memosUrl: '',
@@ -1467,56 +1584,6 @@ function extractMomentsConfig() {
             showSkeleton: true,
         };
     }
-
-    // 从注释位置开始查找 moments:
-    const momentsKeyPos = configContent.indexOf('moments:', momentsStart);
-    if (momentsKeyPos === -1) {
-        return {
-            enabled: false,
-            memosUrl: '',
-            count: 10,
-            tags: [],
-            showSkeleton: true,
-        };
-    }
-
-    // 找到第一个 { 的位置
-    const startBrace = configContent.indexOf('{', momentsKeyPos);
-    if (startBrace === -1) {
-        return {
-            enabled: false,
-            memosUrl: '',
-            count: 10,
-            tags: [],
-            showSkeleton: true,
-        };
-    }
-
-    // 使用括号匹配找到对应的 }
-    let depth = 0;
-    let endBrace = -1;
-    for (let i = startBrace; i < configContent.length; i++) {
-        if (configContent[i] === '{') depth++;
-        else if (configContent[i] === '}') {
-            depth--;
-            if (depth === 0) {
-                endBrace = i;
-                break;
-            }
-        }
-    }
-
-    if (endBrace === -1) {
-        return {
-            enabled: false,
-            memosUrl: '',
-            count: 10,
-            tags: [],
-            showSkeleton: true,
-        };
-    }
-
-    const momentsContent = configContent.substring(startBrace + 1, endBrace);
 
     const enabledMatch = momentsContent.match(/enabled:\s*(true|false)/);
     const memosUrlMatch = momentsContent.match(/memosUrl:\s*['"`]([^'"`]+)['"`]/);
@@ -1544,10 +1611,9 @@ function extractMomentsConfig() {
 
 // 提取 Guestbook 配置
 function extractGuestbookConfig() {
-    // 找到 "// ========== 留言板配置 ==========" 注释后的 guestbook 块
-    // 避免匹配到 pages.guestbook
-    const guestbookStart = configContent.indexOf('// ========== 留言板配置 ==========');
-    if (guestbookStart === -1) {
+    // 顶层 guestbook 配置（用缩进区分 pages.guestbook，且不依赖分节注释是否存在）
+    const guestbookContent = extractObjectSource(configContent, 'guestbook', true);
+    if (!guestbookContent) {
         return {
             enabled: false,
             provider: 'waline',
@@ -1562,74 +1628,6 @@ function extractGuestbookConfig() {
             },
         };
     }
-
-    // 从注释位置开始查找 guestbook:
-    const guestbookKeyPos = configContent.indexOf('guestbook:', guestbookStart);
-    if (guestbookKeyPos === -1) {
-        return {
-            enabled: false,
-            provider: 'waline',
-            title: '留言板',
-            description: '欢迎留下你的足迹',
-            waline: {},
-            artalk: {},
-            signalStream: {
-                enabled: true,
-                tracks: 2,
-                maxChars: 50,
-            },
-        };
-    }
-
-    // 找到第一个 { 的位置
-    const startBrace = configContent.indexOf('{', guestbookKeyPos);
-    if (startBrace === -1) {
-        return {
-            enabled: false,
-            provider: 'waline',
-            title: '留言板',
-            description: '欢迎留下你的足迹',
-            waline: {},
-            artalk: {},
-            signalStream: {
-                enabled: true,
-                tracks: 2,
-                maxChars: 50,
-            },
-        };
-    }
-
-    // 使用括号匹配找到对应的 }
-    let depth = 0;
-    let endBrace = -1;
-    for (let i = startBrace; i < configContent.length; i++) {
-        if (configContent[i] === '{') depth++;
-        else if (configContent[i] === '}') {
-            depth--;
-            if (depth === 0) {
-                endBrace = i;
-                break;
-            }
-        }
-    }
-
-    if (endBrace === -1) {
-        return {
-            enabled: false,
-            provider: 'waline',
-            title: '留言板',
-            description: '欢迎留下你的足迹',
-            waline: {},
-            artalk: {},
-            signalStream: {
-                enabled: true,
-                tracks: 2,
-                maxChars: 50,
-            },
-        };
-    }
-
-    const guestbookContent = configContent.substring(startBrace + 1, endBrace);
 
     // 基础配置
     const enabledMatch = guestbookContent.match(/enabled:\s*(true|false)/);
@@ -1733,8 +1731,8 @@ function generateCommentSDK(guestbookConfig) {
 
 // 提取 Music 配置
 function extractMusicConfig() {
-    const musicMatch = configContent.match(/music:\s*\{([\s\S]*?)(?=\n\s*\},?\s*\n\s*\/\/ =|\n\s*\},?\s*$)/);
-    if (!musicMatch) {
+    const musicContent = extractObjectSource(configContent, 'music');
+    if (!musicContent) {
         return {
             enabled: false,
             volume: 0.5,
@@ -1751,7 +1749,6 @@ function extractMusicConfig() {
         };
     }
 
-    const musicContent = musicMatch[1];
 
     // 基础配置
     const enabledMatch = musicContent.match(/enabled:\s*(true|false)/);
@@ -1831,17 +1828,17 @@ function extractFaviconConfig() {
 
 // 提取 Nav 配置
 function extractNavConfig() {
-    // 使用更精确的模式匹配 nav 配置块
-    const navMatch = configContent.match(/nav:\s*\{([\s\S]*?)(?=\n\s*\},?\s*\n\s*\/\/ =|\n\s*\},?\s*$)/);
-    if (!navMatch) {
+    // 用花括号配对取块。以前这里要求 nav: {...} 后面紧跟 // ===== 分节注释，
+    // 而可视化编辑器保存时会抹掉所有注释，于是 nav.menus 里加的自定义菜单项
+    // 永远渲染不出来（兜底值和默认配置恰好一样，所以站点看着正常，极易忽略）。
+    const navContent = extractObjectSource(configContent, 'nav');
+    if (!navContent) {
         return {
             enabled: true,
             brand: { showPrompt: true, hoverText: '~/whoami' },
             menus: []
         };
     }
-
-    const navContent = navMatch[1];
 
     const enabledMatch = navContent.match(/enabled:\s*(true|false)/);
 
@@ -2067,10 +2064,56 @@ function generateCustomMenusMobileDropdownHTML(menus) {
     }).join('');
 }
 
+/**
+ * 单独渲染贡献图（projects 关闭、contribution 开启时使用）
+ * 带一段 sr-only 文字摘要——以前贡献图容器是 aria-hidden="true"，
+ * 读屏用户完全获取不到里面的信息。
+ */
+function generateContributionHTML(contributionData, contributionConfig) {
+    const levels = (contributionData && contributionData.levels) || [];
+    const counts = (contributionData && contributionData.counts) || [];
+    const dates = (contributionData && contributionData.dates) || [];
+
+    const total = counts.reduce((sum, c) => sum + (c || 0), 0);
+    const activeDays = counts.filter(c => c > 0).length;
+    const range = dates.length ? `${dates[0]} 至 ${dates[dates.length - 1]}` : '';
+
+    let cells = '';
+    for (let i = 0; i < 78; i++) {
+        const level = levels[i] ?? 0;
+        const count = counts[i] ?? 0;
+        const date = dates[i] || '';
+        const title = count > 0 ? `${count} 次贡献于 ${date}` : `无贡献于 ${date}`;
+        cells += `<div class="contribution-cell" data-level="${level}" title="${escapeHTML(title)}"></div>`;
+    }
+
+    return `                <div class="divider divider-compact lazy-load" data-delay="4"></div>
+                <div class="projects-section lazy-load" id="contribution-section" data-delay="4">
+                    <div class="projects-header">
+                        <i class="${escapeHTML(contributionConfig.titleIcon || 'fa-solid fa-code-commit')}"></i>
+                        <span class="projects-title">${escapeHTML(contributionConfig.titleText || '贡献记录')}</span>
+                        <span class="section-count">${activeDays} 活跃天</span>
+                    </div>
+                    <p class="sr-only">最近 ${dates.length} 天（${range}）共 ${total} 次贡献，其中 ${activeDays} 天有提交。</p>
+                    <div class="contribution-graph" aria-hidden="true">
+                        ${cells}
+                    </div>
+                </div>`;
+}
+
 // 生成项目展示 HTML（仪表盘式布局）
+// contribution 可以单独开启：以前贡献图只挂在项目区域内部，projects 关着时
+// 整个函数直接 return ''，导致 contribution.enabled:true 什么也不渲染。
 function generateProjectsHTML(repos, projectsConfig, contributionData, contributionConfig) {
-    if (!projectsConfig.enabled) {
+    const contributionOn = !!(contributionConfig && contributionConfig.enabled);
+    // 两边都关才真的什么都不渲染
+    if (!projectsConfig.enabled && !contributionOn) {
         return '';
+    }
+
+    // 只开贡献图、不开项目列表时，跳过项目区域，只输出贡献图
+    if (!projectsConfig.enabled && contributionOn) {
+        return generateContributionHTML(contributionData, contributionConfig);
     }
     
     // 即使没有仓库数据，也要显示项目区域但带错误提示
@@ -2180,6 +2223,7 @@ function generateProjectsHTML(repos, projectsConfig, contributionData, contribut
                         <span class="section-count">${repos.length} repos</span>
                     </div>
                     <!-- Contribution Graph -->
+                    <p class="sr-only">最近 ${dates.length} 天共 ${counts.reduce((s, c) => s + (c || 0), 0)} 次贡献，其中 ${counts.filter(c => c > 0).length} 天有提交。</p>
                     <div class="contribution-graph" aria-hidden="true">
                         ${contributionCells}
                     </div>
@@ -2251,16 +2295,18 @@ function escapeHTML(str) {
 
 // 提取 site 配置块
 function extractSiteConfig() {
-    const siteMatch = configContent.match(/site:\s*\{([\s\S]*?)\n\s*\},?\n/);
-    if (!siteMatch) {
+    // 用花括号配对取块。以前的非贪婪正则遇到第一个嵌套收尾就停，
+    // site 块里一旦出现同样缩进的嵌套对象就会被截断。
+    const config = extractObjectSource(configContent, 'site');
+    if (!config) {
         return {
             name: 'MoeWah',
             tagline: '技术博主 / 开源爱好者 / AI 探索者',
             url: '',
-            ogImage: '/images/avatar.webp',
+            ogImage: '/images/avatar.png',
         };
     }
-    const content = siteMatch[1];
+    const content = config;
     const urlValue = extractStringValue(content, 'url');
     return {
         name: extractStringValue(content, 'name') || 'MoeWah',
@@ -2421,6 +2467,9 @@ const config = {
     site: extractSiteConfig(),
     // 兼容旧字段（从 site.url 同步）；规范化协议与结尾斜杠
     siteUrl: normalizeSiteUrl(extractSiteConfig().url),
+    // 资源 URL 前缀：默认留空 → 所有 CSS/JS/图片用根相对路径（本地预览、换域名都不用改）
+    // 只有把站点部署到子路径（如 https://example.com/myblog/）时才需要显式配置
+    assetUrlBase: normalizeSiteUrl(extractSiteConfig().assetUrlBase || ''),
 
     // SEO（首页专用）
     title: extractString(/title:\s*['"`]([^'"`]+)['"`]/, 'MoeWah - 技术博主 / 开源爱好者 / AI 探索者'),
@@ -2428,7 +2477,7 @@ const config = {
     keywords: extractArray(/keywords:\s*\[([\s\S]*?)\]/, ['MoeWah', '技术博客', 'Astro', 'Docker']),
     ogTitle: extractNestedString(/og:\s*\{([\s\S]*?)\}/, 'title', 'MoeWah - 个人主页'),
     ogDescription: extractNestedString(/og:\s*\{([\s\S]*?)\}/, 'description', '开源爱好者 / Astro爱好者 / AI探索者'),
-    ogImage: extractNestedString(/og:\s*\{([\s\S]*?)\}/, 'image', 'https://www.moewah.com/images/avatar.webp'),
+    ogImage: extractNestedString(/og:\s*\{([\s\S]*?)\}/, 'image', ''),
 
     // Pages - 独立页面配置
     pages: extractPagesConfig(),
@@ -2460,7 +2509,7 @@ const config = {
     // Footer - Copyright
     footerCopyrightYear: extractNestedString(/copyright:\s*\{([\s\S]*?)\}/, 'year', '2026'),
     footerCopyrightName: extractNestedString(/copyright:\s*\{([\s\S]*?)\}/, 'name', 'MoeWah'),
-    footerCopyrightUrl: extractNestedString(/copyright:\s*\{([\s\S]*?)\}/, 'url', 'https://www.moewah.com/'),
+    footerCopyrightUrl: extractNestedString(/copyright:\s*\{([\s\S]*?)\}/, 'url', ''),
     // Footer - ICP
     footerIcpEnabled: extractNestedBoolean(/icp:\s*\{([\s\S]*?)\}/, 'enabled', false),
     footerIcpNumber: extractNestedString(/icp:\s*\{([\s\S]*?)\}/, 'number', ''),
@@ -2499,6 +2548,12 @@ const config = {
 };
 
 /**
+ * 首页 URL 与 SEO（模块级常量，首页 / 404 / 简历等页面共用）
+ */
+const homePageUrl = config.siteUrl ? config.siteUrl.replace(/\/$/, '') + '/' : '';
+const seoHome = generatePageSEO('home');
+
+/**
  * 页面 SEO 生成函数
  * 根据页面类型生成统一的 SEO 元数据
  * @param {string} pageKey - 页面标识（'home' | '404' | 'moments' 等）
@@ -2517,7 +2572,8 @@ function generatePageSEO(pageKey) {
             keywords: config.keywords.join(', '),
             ogTitle: config.ogTitle,
             ogDescription: config.ogDescription,
-            ogImage: config.ogImage,
+            // seo.og.image 为空时回退到 site.ogImage（都是站内头像，不会是第三方地址）
+            ogImage: config.ogImage || siteOgImage,
             robots: ''
         };
     }
@@ -2587,6 +2643,9 @@ function generateSEOMetaHTML(seo, pageUrl = '') {
         html += `        <meta name="robots" content="${seo.robots}" />\n`;
     }
 
+    // og:image / twitter:image 规范要求绝对 URL，相对路径需拼上站点域名
+    const ogImage = toAbsoluteUrl(seo.ogImage);
+
     // Open Graph
     html += `\n        <!-- Open Graph / Facebook -->\n`;
     html += `        <meta property="og:type" content="website" />\n`;
@@ -2595,7 +2654,7 @@ function generateSEOMetaHTML(seo, pageUrl = '') {
     }
     html += `        <meta property="og:title" content="${seo.ogTitle}" />\n`;
     html += `        <meta property="og:description" content="${seo.ogDescription}" />\n`;
-    html += `        <meta property="og:image" content="${seo.ogImage}" />\n`;
+    html += `        <meta property="og:image" content="${ogImage}" />\n`;
 
     // Twitter
     html += `\n        <!-- Twitter -->\n`;
@@ -2605,9 +2664,61 @@ function generateSEOMetaHTML(seo, pageUrl = '') {
     }
     html += `        <meta property="twitter:title" content="${seo.ogTitle}" />\n`;
     html += `        <meta property="twitter:description" content="${seo.ogDescription}" />\n`;
-    html += `        <meta property="twitter:image" content="${seo.ogImage}" />`;
+    html += `        <meta property="twitter:image" content="${ogImage}" />`;
 
     return html;
+}
+
+/**
+ * 把相对路径补全为绝对 URL；已是绝对 URL 或 siteUrl 未配置时原样返回
+ */
+function toAbsoluteUrl(url) {
+    if (!url) return '';
+    if (/^(https?:)?\/\//i.test(url) || /^(data|mailto|tel):/i.test(url)) return url;
+    if (!config.siteUrl) return url;
+    return config.siteUrl.replace(/\/$/, '') + (url.startsWith('/') ? url : '/' + url);
+}
+
+/**
+ * canonical 链接；siteUrl 未配置时返回空串（不输出无意义的相对 canonical）
+ */
+function generateCanonicalHTML(pageUrl) {
+    if (!pageUrl) return '';
+    return `<link rel="canonical" href="${pageUrl}" />`;
+}
+
+/**
+ * theme-color：让移动端浏览器地址栏跟随站点主色
+ * 同时给出 light/dark 两套，由浏览器按 prefers-color-scheme 选择
+ */
+function generateThemeColorHTML() {
+    const light = (getDefaultColors('light') || {}).bgPrimary || '#E5E9F0';
+    const dark = (getDefaultColors('dark') || {}).bgPrimary || '#1e1e2e';
+    return `<meta name="theme-color" content="${light}" media="(prefers-color-scheme: light)" />\n` +
+           `        <meta name="theme-color" content="${dark}" media="(prefers-color-scheme: dark)" />`;
+}
+
+/**
+ * 结构化数据（JSON-LD）：声明这是一个个人主页 + 同名社交链接
+ * 有助于搜索引擎在结果中展示作者信息
+ */
+function generateStructuredDataHTML(seo) {
+    const data = {
+        '@context': 'https://schema.org',
+        '@type': 'Person',
+        name: config.name,
+        url: config.siteUrl || undefined,
+        description: seo.description || undefined,
+        image: toAbsoluteUrl(config.site.ogImage) || undefined,
+        sameAs: (config.links || [])
+            .filter(l => l.enabled !== false && l.external && /^https?:\/\//.test(l.url || ''))
+            .map(l => l.url)
+    };
+    // 清掉 undefined 字段，避免输出 "url": undefined
+    Object.keys(data).forEach(k => { if (data[k] === undefined) delete data[k]; });
+    if (!data.sameAs || data.sameAs.length === 0) delete data.sameAs;
+
+    return `<script type="application/ld+json">\n        ${JSON.stringify(data)}\n        </script>`;
 }
 
 /**
@@ -2660,8 +2771,8 @@ function rewriteAssetUrls(html, basePath = '') {
         return true;
     };
 
-    // siteUrl 有值则拼接域名，为空则使用纯根相对路径
-    const pathPrefix = config.siteUrl ? config.siteUrl.replace(/\/$/, '') : '';
+    // assetUrlBase 有值则拼接前缀，为空则使用纯根相对路径（默认， portable）
+    const pathPrefix = config.assetUrlBase ? config.assetUrlBase.replace(/\/$/, '') : '';
 
     // 重写 href 属性
     html = html.replace(/href="([^"]*)"/g, (match, url) => {
@@ -2718,9 +2829,12 @@ async function build() {
 
     // 显示站点 URL 配置
     if (config.siteUrl) {
-        console.log('🌐 静态资源 URL: ' + config.siteUrl + ' (绝对路径模式)');
+        console.log('🌐 资源 URL 前缀: ' + config.assetUrlBase);
     } else {
-        console.log('🌐 静态资源 URL: 相对路径模式');
+        console.log('🌐 资源 URL: 根相对路径');
+    }
+    if (config.siteUrl) {
+        console.log('🔗 SEO 基准 URL: ' + config.siteUrl + '（canonical / og / sitemap）');
     }
 
     // 获取 RSS 文章
@@ -2765,6 +2879,58 @@ async function build() {
         contributionData = await fetchUserContributions(null, false);
     }
 
+    // 页面展示用的头像 URL：稍后（cleanDist 之后）会尝试生成压缩版 WebP 并更新它
+    let avatarDisplayUrl = config.avatar;
+
+    // 清理并创建 dist 目录
+    cleanDist();
+
+    // 确保 images 目录存在（后续 favicon / 头像 WebP / 图片复制都要用）
+    const distImagesDir = path.join(distDir, 'images');
+    if (!fs.existsSync(distImagesDir)) {
+        fs.mkdirSync(distImagesDir, { recursive: true });
+    }
+
+    let faviconPath = '';
+    let appleTouchPath = '';
+
+    // 从头像生成一份压缩过的 WebP 供页面展示用。
+    // 原因：可视化编辑器的上传接口只写 images/avatar.<一个扩展名>，
+    // 仓库里那个提交进来的 avatar.webp 不会跟着更新——曾经因此让站点
+    // 在用户换了新头像后仍然显示半年前的旧图。所以这里每次构建都从
+    // config.avatar 指向的真实文件重新生成，dist 里的 webp 永远是当前的。
+    // （avatarDisplayUrl 已在上方声明，这里只更新它的值）
+    {
+        // 头像位置：优先 src/ 约定，其次根目录 images/ 约定（编辑器上传位置）
+        let avatarSrc = path.join(rootDir, 'src', config.avatar);
+        if (!fs.existsSync(avatarSrc)) {
+            avatarSrc = path.join(rootDir, config.avatar);
+        }
+        const avatarWebpDest = path.join(distDir, 'images/avatar.webp');
+        // 320px 足够覆盖 140px 展示尺寸的 2x 屏，体积能压到 20KB 左右
+        const DISPLAY_SIZE = 320;
+
+        if (fs.existsSync(avatarSrc)) {
+            try {
+                const meta = await sharp(avatarSrc).metadata();
+                const w = Math.min(meta.width || DISPLAY_SIZE, DISPLAY_SIZE);
+                await sharp(avatarSrc)
+                    .resize(w, null, { withoutEnlargement: true })
+                    .webp({ quality: 82 })
+                    .toFile(avatarWebpDest);
+                avatarDisplayUrl = '/images/avatar.webp';
+                console.log('🖼️  头像 → images/avatar.webp (' + w + 'px, 展示用)');
+            } catch (e) {
+                console.warn('   ⚠️ 头像 WebP 生成失败，回退为原图: ' + e.message);
+            }
+        } else {
+            console.warn('   ⚠️ 头像文件不存在: ' + config.avatar);
+        }
+    }
+
+
+
+
     // 替换所有占位符
     let html = template
         // Theme Init Script (必须在所有 CSS 之前执行，防止闪烁)
@@ -2774,18 +2940,18 @@ async function build() {
         .replace(/{{DEFAULT_THEME_VARS}}/g, generateDefaultThemeCSS())
 
         // SEO
-        .replace(/{{TITLE}}/g, config.title)
-        .replace(/{{DESCRIPTION}}/g, config.description)
-        .replace(/{{KEYWORDS}}/g, config.keywords.join(', '))
-        .replace(/{{OG_TITLE}}/g, config.ogTitle)
-        .replace(/{{OG_DESCRIPTION}}/g, config.ogDescription)
-        .replace(/{{OG_IMAGE}}/g, config.ogImage)
+        .replace(/{{PAGE_TITLE}}/g, seoHome.title)
+        .replace(/{{SEO_META}}/g, generateSEOMetaHTML(seoHome, homePageUrl))
+        .replace(/{{CANONICAL}}/g, generateCanonicalHTML(homePageUrl))
+        .replace(/{{THEME_COLOR}}/g, generateThemeColorHTML())
+        .replace(/{{STRUCTURED_DATA}}/g, generateStructuredDataHTML(seoHome))
 
         // Profile
         .replace(/{{NAME}}/g, config.name)
-        .replace(/{{AVATAR}}/g, config.avatar)
+        .replace(/{{AVATAR}}/g, avatarDisplayUrl)
         .replace(/{{TAGLINE_PREFIX}}/g, config.taglinePrefix)
         .replace(/{{TAGLINE_HIGHLIGHT}}/g, config.taglineHighlight)
+        .replace(/{{PROFILE_ACTIONS}}/g, generateProfileActionsHTML(config.links))
 
         // Terminal
         .replace(/{{TERMINAL_TITLE}}/g, config.terminalTitle)
@@ -2834,18 +3000,6 @@ async function build() {
         // Analytics
         .replace(/{{ANALYTICS}}/g, generateAnalyticsHTML(config));
 
-    // 清理并创建 dist 目录
-    cleanDist();
-
-    // ========== Favicon 处理（必须） ==========
-    console.log('🔘 处理 Favicon...');
-
-    // 确保 images 目录存在
-    const distImagesDir = path.join(distDir, 'images');
-    if (!fs.existsSync(distImagesDir)) {
-        fs.mkdirSync(distImagesDir, { recursive: true });
-    }
-
     // 复制根目录 images/（头像、favicon 等静态图片）到 dist/images/
     // 此前这些文件从不进入 dist，导致线上头像/favicon 404
     const rootImagesDir = path.join(rootDir, 'images');
@@ -2854,6 +3008,12 @@ async function build() {
             const srcImgPath = path.join(rootImagesDir, imgFile);
             if (!fs.statSync(srcImgPath).isFile()) continue;
             const destImgPath = path.join(distImagesDir, imgFile);
+            // .ico 不走 sharp（格式不支持，只会报错），直接复制
+            if (path.extname(imgFile).toLowerCase() === '.ico') {
+                fs.copyFileSync(srcImgPath, destImgPath);
+                console.log('📋 images/' + imgFile + ' → dist/images/' + imgFile + ' (直接复制)');
+                continue;
+            }
             try {
                 await processImageFile(srcImgPath, destImgPath, minifyConfig);
                 console.log('🖼️  images/' + imgFile + ' → dist/images/' + imgFile);
@@ -2864,8 +3024,10 @@ async function build() {
         }
     }
 
-    let faviconPath = '';
-    let appleTouchPath = '';
+
+
+    // ========== Favicon 处理（必须） ==========
+    console.log('🔘 处理 Favicon...');
 
     // 优先使用自定义 favicon（path 有值且文件存在）
     if (config.favicon.path) {
@@ -2917,9 +3079,9 @@ async function build() {
     // 当 siteUrl 配置时，使用绝对路径
     function generateFaviconLinks(basePath = '') {
         if (!faviconPath) return '';
-        const iconUrl = config.siteUrl ? `${config.siteUrl.replace(/\/$/, '')}/${faviconPath}` : `${basePath}${faviconPath}`;
+        const iconUrl = config.assetUrlBase ? `${config.assetUrlBase.replace(/\/$/, '')}/${faviconPath}` : `${basePath}${faviconPath}`;
         if (appleTouchPath) {
-            const appleUrl = config.siteUrl ? `${config.siteUrl.replace(/\/$/, '')}/${appleTouchPath}` : `${basePath}${appleTouchPath}`;
+            const appleUrl = config.assetUrlBase ? `${config.assetUrlBase.replace(/\/$/, '')}/${appleTouchPath}` : `${basePath}${appleTouchPath}`;
             return `<link rel="icon" type="image/x-icon" href="${iconUrl}" />
         <link rel="apple-touch-icon" href="${appleUrl}" />`;
         }
@@ -2979,6 +3141,10 @@ async function build() {
             .replace(/{{NAV_LINKS_MOBILE_DROPDOWN}}/g, generateNavLinksMobileDropdown({ activePage: '', config }))
             .replace(/{{FOOTER_CONTENT}}/g, generateFooterHTML(config))
             .replace(/{{FAVICON_LINKS}}/g, generateFaviconLinks(''))
+            // 404 页面可见文案：从 config.pages['404'] 读，改配置即生效
+            // （以前这里是模板里硬编码的，配置只喂给 SEO meta，页面上看不出变化）
+            .replace(/{{ERROR_TITLE}}/g, config.pages?.['404']?.title || '页面走丢了')
+            .replace(/{{ERROR_DESCRIPTION}}/g, config.pages?.['404']?.description || '抱歉，您访问的页面不存在或已被删除。')
             // SEO 替换
             .replace(/{{PAGE_TITLE}}/g, seo404.title)
             .replace(/{{SEO_META}}/g, generateSEOMetaHTML(seo404));
@@ -3011,101 +3177,11 @@ async function build() {
         const resumeCfg = parseResumeConfig();
         if (resumeCfg) {
             let htmlResume = renderPartials(fs.readFileSync(templateResumePath, 'utf8'));
-            const b = resumeCfg.basics || {};
-            // 联系方式 → chips 渲染（每个 contact 单独一条，可加可删）
-            const contactIcons = {
-                phone: 'fa-solid fa-phone',
-                email: 'fa-solid fa-envelope',
-                website: 'fa-solid fa-globe',
-                github: 'fa-brands fa-github',
-                wechat: 'fa-brands fa-weixin',
-                linkedin: 'fa-brands fa-linkedin',
-                twitter: 'fa-brands fa-twitter',
-                bilibili: 'fa-brands fa-bilibili',
-                blog: 'fa-solid fa-pen-nib',
-                other: 'fa-solid fa-link',
-            };
-            const labelOf = { phone: v => v, email: v => v, website: v => v.replace(/^https?:\/\//, ''), github: () => 'GitHub', wechat: v => v, linkedin: () => 'LinkedIn', twitter: () => 'Twitter', bilibili: () => 'Bilibili', blog: v => v.replace(/^https?:\/\//, ''), other: v => v };
-            const contactsHTML = (resumeCfg.contacts || []).map(c => {
-                const t = (c.type || 'other');
-                const v = c.value || '';
-                const icon = contactIcons[t] || contactIcons.other;
-                const label = labelOf[t] ? labelOf[t](v) : v;
-                if (t === 'phone') return `<a class="chip" href="tel:${escapeHTML(v)}"><i class="${icon}"></i>${escapeHTML(label)}</a>`;
-                if (t === 'email') return `<a class="chip" id="resume-email" href="javascript:void(0)" data-email-encoded="${encodeEmail(v)}" onclick="window.__copyEmail(this)"><i class="${icon}"></i>${escapeHTML(label)}</a>`;
-                if (t === 'github' || t === 'linkedin' || t === 'twitter' || t === 'bilibili') return `<a class="chip" href="${escapeHTML(v)}" target="_blank" rel="noopener noreferrer"><i class="${icon}"></i>${escapeHTML(label)}</a>`;
-                return `<a class="chip" href="${escapeHTML(v)}" target="_blank" rel="noopener noreferrer"><i class="${icon}"></i>${escapeHTML(label)}</a>`;
-            }).join('\n                    ');
-            htmlResume = htmlResume
+            const { renderResumePage } = require('./resume-renderer');
+            htmlResume = renderResumePage(htmlResume, resumeCfg)
                 .replace(/{{FAVICON_LINKS}}/g, generateFaviconLinks(''))
                 .replace(/{{THEME_INIT_SCRIPT}}/g, generateThemeInitScript())
-                .replace(/{{DEFAULT_THEME_VARS}}/g, generateDefaultThemeCSS())
-                .replace(/\{\{NAME\}\}/g, escapeHTML(b.name || ''))
-                .replace(/\{\{TITLE\}\}/g, escapeHTML(b.title || ''))
-                .replace(/\{\{SCHOOL\}\}/g, escapeHTML(b.school || ''))
-                .replace(/\{\{AVATAR\}\}/g, b.avatar || '')
-                .replace(/\{\{MBTI\}\}/g, escapeHTML(b.mbti || ''))
-                .replace(/\{\{CONTACTS_HTML\}\}/g, contactsHTML)
-                .replace(/\{\{EDUCATION_HTML\}\}/g, (resumeCfg.education || []).map(edu => `
-                    <div class="item">
-                        <div class="item-head">
-                            <div class="item-title">${escapeHTML(edu.school)}<span class="sub">${escapeHTML(edu.major || '')}${edu.major && edu.degree ? ' · ' : ''}${escapeHTML(edu.degree || '')}</span></div>
-                            <div class="item-meta">${escapeHTML(edu.period || '')}</div>
-                        </div>
-                        ${edu.gpa ? `<div class="item-meta" style="color:var(--accent)">${escapeHTML(edu.gpa)}</div>` : ''}
-                    </div>`).join(''))
-                .replace(/\{\{SKILLS_HTML\}\}/g, (resumeCfg.skills || []).map(s => `
-                    <div class="sk-card">
-                        <div class="cat"><i class="fa-solid fa-chevron-right" style="font-size:9px"></i>${escapeHTML(s.category)}</div>
-                        <div class="desc">${escapeHTML(s.description)}</div>
-                    </div>`).join(''))
-                .replace(/\{\{PUBLICATIONS_HTML\}\}/g, (resumeCfg.publications || []).map(p => `
-                    <div class="item">
-                        <div class="item-head">
-                            <div class="item-title">${escapeHTML(p.title)}${p.abbrev ? `<span class="sub">${escapeHTML(p.abbrev)}</span>` : ''}</div>
-                            <div class="item-meta">${escapeHTML(p.period || '')}</div>
-                        </div>
-                        <div class="item-tags">
-                            ${p.venue ? `<span class="tag">${escapeHTML(p.venue)}</span>` : ''}
-                            ${p.role ? `<span class="tag">${escapeHTML(p.role)}</span>` : ''}
-                        </div>
-                        ${p.highlights && p.highlights.length ? `<ul class="bul">${p.highlights.map(h => `<li>${escapeHTML(h)}</li>`).join('')}</ul>` : ''}
-                    </div>`).join(''))
-                .replace(/\{\{OPENSOURCE_HTML\}\}/g, (resumeCfg.openSource || []).map(o => `
-                    <div class="item">
-                        <div class="item-head">
-                            <div class="item-title">${o.url ? `<a href="${escapeHTML(o.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">${escapeHTML(o.name)}</a>` : escapeHTML(o.name)}${o.org ? `<span class="sub">${escapeHTML(o.org)}</span>` : ''}</div>
-                            <div class="item-meta">${escapeHTML(o.period || '')}</div>
-                        </div>
-                        <div class="item-tags">
-                            ${o.role ? `<span class="tag">${escapeHTML(o.role)}</span>` : ''}
-                            ${o.impact ? `<span class="tag" style="background:rgba(255,193,7,.15);color:#ffc107;border-color:rgba(255,193,7,.35)">⭐ ${escapeHTML(o.impact)}</span>` : ''}
-                        </div>
-                        <div class="item-desc">${escapeHTML(o.description)}</div>
-                    </div>`).join(''))
-                .replace(/\{\{PROJECTS_HTML\}\}/g, (resumeCfg.projects || []).map(p => `
-                    <div class="item">
-                        <div class="item-head">
-                            <div class="item-title">${escapeHTML(p.name)}${p.tag ? `<span class="sub">${escapeHTML(p.tag)}</span>` : ''}</div>
-                            <div class="item-meta">${escapeHTML(p.period || '')}</div>
-                        </div>
-                        <div class="item-tags">
-                            ${p.role ? `<span class="tag">${escapeHTML(p.role)}</span>` : ''}
-                        </div>
-                        ${p.impact ? `<div class="item-meta" style="color:var(--accent)">${escapeHTML(p.impact)}</div>` : ''}
-                        <div class="item-desc">${escapeHTML(p.description)}</div>
-                    </div>`).join(''))
-                .replace(/\{\{AWARDS_HTML\}\}/g, (resumeCfg.awards || []).map(a => {
-                    const level = a.level || '';
-                    const cls = /一等奖|特等奖|金/i.test(level) ? 'level-gold'
-                        : /二等奖|银/i.test(level) ? 'level-silver'
-                        : /三等奖|铜/i.test(level) ? 'level-bronze'
-                        : 'level-award';
-                    return `<div class="award-row">
-                        <div class="award-name">${escapeHTML(a.name)}<small>· ${escapeHTML(level)}</small></div>
-                        <span class="tag ${cls}">${escapeHTML(a.date || '')}</span>
-                    </div>`;
-                }).join(''));
+                .replace(/{{DEFAULT_THEME_VARS}}/g, generateDefaultThemeCSS());
 
             htmlResume = rewriteAssetUrls(htmlResume, '');
             htmlResume = processInlineCSS(htmlResume, minifyConfig);
@@ -3261,11 +3337,21 @@ async function build() {
     };
 
     // 处理静态资源（带压缩）
-    async function processFile(srcFile, destFile) {
+    async function processFile(srcFile, destFile, opts) {
         const srcPath = path.join(rootDir, srcFile);
         const destPath = path.join(distDir, destFile);
 
-        if (!fs.existsSync(srcPath)) return;
+        // 功能未启用时跳过（避免把上百 KB 用不到的代码打进 dist）
+        if (opts && opts.skipIf && opts.skipIf()) return;
+
+        if (!fs.existsSync(srcPath)) {
+            // 不再静默跳过：缺失的源文件会让 dist 里少一个文件，
+            // 而模板可能仍在引用它（表现为线上 404），必须显式告警
+            console.warn(`⚠️  源文件缺失，已跳过: ${srcFile} → dist/${destFile}`);
+            if (typeof stats.missing === 'undefined') stats.missing = [];
+            stats.missing.push(srcFile);
+            return;
+        }
 
         // 确保目标目录存在
         const destDir = path.dirname(destPath);
@@ -3314,12 +3400,16 @@ async function build() {
     await processFile('src/media-manager.js', 'media-manager.js');
     await processFile('src/app.js', 'app.js');
     await processFile('src/style.css', 'style.css');
+    await processFile('src/resume.css', 'resume.css');
+    await processFile('src/resume-page.js', 'resume-page.js');
     await processFile('src/config.js', 'config.js');
     await processFile('src/theme-utils.js', 'theme-utils.js');
-    await processFile('src/moments.js', 'moments.js');
+    await processFile('src/moments.js', 'moments.js', { skipIf: () => !(config.moments && config.moments.enabled) });
 
     // 处理留言板模块（包含评论系统）
     // 先读取评论独立模块
+    // 留言板未启用时整块跳过，避免 dist 里堆一堆用不到的代码
+    if (config.guestbook && config.guestbook.enabled) {
     const commentsStandalonePath = path.join(rootDir, 'src/comments-standalone.js');
     const guestbookPath = path.join(rootDir, 'src/guestbook.js');
     if (fs.existsSync(commentsStandalonePath) && fs.existsSync(guestbookPath)) {
@@ -3345,8 +3435,11 @@ async function build() {
     } else {
         await processFile('src/guestbook.js', 'guestbook.js');
     }
+    }
 
-    await processFile('src/images/avatar.webp', 'images/avatar.webp');
+    // 注意：dist/images/avatar.webp 不再从源文件复制，而是构建时从 config.avatar
+    // 指向的真实头像重新生成（见 build() 开头的头像处理块）。仓库里不保留这个派生文件，
+    // 否则编辑器换了新头像后，旧的 webp 会让站点继续显示过期图片。
 
     // 处理捐赠二维码图片
     if (config.donation.enabled && config.donation.methods) {
@@ -3382,6 +3475,10 @@ async function build() {
             }
         }
     }
+
+    // ========== 生成 robots.txt 与 sitemap.xml ==========
+    // 直接扫描 dist 下的 HTML 产出，避免在各个页面生成处手动维护清单
+    generateRobotsAndSitemap(distDir, config.siteUrl);
 
     // 输出压缩统计
     console.log('');
