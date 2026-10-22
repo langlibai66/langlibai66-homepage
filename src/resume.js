@@ -5,7 +5,7 @@
 window.RESUME_CONFIG = {
         basics: {
             name: "杨晨旭",
-            title: "人工智能 · 本科在读",
+            title: "计算机技术 · 硕士在读",
             school: "太原理工大学",
             avatar: "images/resume-portrait.jpg",
             mbti: "ENTJ-A"

@@ -2,6 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "homepage-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/serve.js"],
+      "port": 8080
+    },
+    {
       "name": "moehome-editor",
       "runtimeExecutable": "node",
       "runtimeArgs": ["editor-server.js"],
