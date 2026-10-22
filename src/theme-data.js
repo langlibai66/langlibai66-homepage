@@ -27,11 +27,11 @@ const builtinSchemes = {
     modes: ["light"],
     colors: {
       accent: "#88C0D0",
-      bgPrimary: "#E5E9F0",
-      bgSecondary: "#ECEFF4",
-      textPrimary: "#2E3440",
-      textSecondary: "#4C566A",
-      border: "#D8DEE9",
+      bgPrimary: "#F4F6F8",
+      bgSecondary: "#FFFFFF",
+      textPrimary: "#26333C",
+      textSecondary: "#62707C",
+      border: "#E5E9ED",
     },
   },
   // 暗色默认 = 摩卡色（Catppuccin）

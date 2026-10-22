@@ -664,8 +664,7 @@ function generateThemeInitScript() {
     ${helpers.ensureContrast}
 
     function getEffectiveTheme(mode) {
-        if (mode === "auto") return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-        return mode;
+        return mode === "dark" ? "dark" : "light";
     }
 
     function getSchemeColors(scheme, mode) {
